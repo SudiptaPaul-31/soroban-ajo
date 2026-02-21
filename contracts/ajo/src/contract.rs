@@ -14,19 +14,19 @@ pub struct AjoContract;
 impl AjoContract {
     /// Create a new Ajo group
     ///
-    /// * `creator` - Who is starting the group (first member)
-    /// * `contribution_amount` - Amount in stroops each person puts in per cycle
-    /// * `cycle_duration` - How long each rotation lasts (in seconds)
-    /// * `max_members` - Total headcount limit for this group
+    /// # Arguments
+    /// * `creator` - Address of the group creator (automatically becomes first member)
+    /// * `contribution_amount` - Fixed amount each member contributes per cycle (in stroops)
+    /// * `cycle_duration` - Duration of each cycle in seconds
+    /// * `max_members` - Maximum number of members allowed in the group
     ///
     /// # Returns
     /// The unique group ID
     ///
     /// # Errors
-    /// * `ContributionAmountZero` - Amount is exactly zero
-    /// * `ContributionAmountNegative` - Amount is less than zero
-    /// * `CycleDurationZero` - Duration is zero
-    /// * `MaxMembersBelowMinimum` - Less than 2 members
+    /// * `InvalidAmount` - If contribution_amount <= 0
+    /// * `InvalidCycleDuration` - If cycle_duration == 0
+    /// * `InvalidMaxMembers` - If max_members < 2
     pub fn create_group(
         env: Env,
         creator: Address,
@@ -63,7 +63,6 @@ impl AjoContract {
             created_at: now,
             cycle_start_time: now,
             is_complete: false,
-            is_cancelled: false,
         };
         
         // Store group
@@ -107,14 +106,14 @@ impl AjoContract {
     /// Join an existing group
     ///
     /// # Arguments
-    /// * `member` - User joining the esusu
-    /// * `group_id` - ID of the target group
+    /// * `member` - Address of the member joining
+    /// * `group_id` - The group to join
     ///
     /// # Errors
-    /// * `GroupNotFound` - Group ID doesn't exist
-    /// * `MaxMembersExceeded` - Room is full
-    /// * `AlreadyMember` - User is already in there
-    /// * `GroupComplete` - This esusu has already finished
+    /// * `GroupNotFound` - If the group does not exist
+    /// * `GroupFull` - If the group has reached max members
+    /// * `AlreadyMember` - If the address is already a member
+    /// * `GroupComplete` - If the group has completed all cycles
     pub fn join_group(env: Env, member: Address, group_id: u64) -> Result<(), AjoError> {
         // Require authentication
         member.require_auth();
@@ -134,7 +133,7 @@ impl AjoContract {
         
         // Check if group is full
         if group.members.len() >= group.max_members {
-            return Err(AjoError::MaxMembersExceeded);
+            return Err(AjoError::GroupFull);
         }
         
         // Add member
@@ -176,7 +175,6 @@ impl AjoContract {
     /// * `NotMember` - If the address is not a member
     /// * `AlreadyContributed` - If already contributed this cycle
     /// * `GroupComplete` - If the group has completed all cycles
-    /// * `OutsideCycleWindow` - If contribution is outside the active cycle window
     pub fn contribute(env: Env, member: Address, group_id: u64) -> Result<(), AjoError> {
         // Require authentication
         member.require_auth();
@@ -192,12 +190,6 @@ impl AjoContract {
         // Check if member
         if !utils::is_member(&group.members, &member) {
             return Err(AjoError::NotMember);
-        }
-        
-        // Check if within cycle window
-        let current_time = utils::get_current_timestamp(&env);
-        if !utils::is_within_cycle_window(&group, current_time) {
-            return Err(AjoError::OutsideCycleWindow);
         }
         
         // Check if already contributed
@@ -316,7 +308,6 @@ impl AjoContract {
             // Advance to next cycle
             group.current_cycle += 1;
             group.cycle_start_time = utils::get_current_timestamp(&env);
-            events::emit_cycle_advanced(&env, group_id, group.current_cycle, group.cycle_start_time);
         }
         
         // Update storage
@@ -340,60 +331,80 @@ impl AjoContract {
         Ok(group.is_complete)
     }
     
-    /// Get comprehensive status information about a group
+    /// Get comprehensive group status
     ///
-    /// Returns the current cycle, the next recipient, and a list of members
-    /// who still need to contribute for the current cycle.
+    /// Returns detailed information about the group's current state including:
+    /// - Current cycle and progress
+    /// - Next recipient for payout
+    /// - Contribution status (received, pending)
+    /// - Cycle timing information
     ///
     /// # Arguments
     /// * `group_id` - The unique group identifier
     ///
     /// # Returns
-    /// GroupStatus containing:
-    /// - current_cycle: Current cycle number
-    /// - next_recipient: Address of member who will receive next payout
-    /// - contributions_pending: Vector of members who haven't contributed yet
+    /// Complete group status information
     ///
     /// # Errors
     /// * `GroupNotFound` - If the group does not exist
-    /// * `NoMembers` - If the group has no members (should never happen)
-    /// * `GroupComplete` - If the group has completed all cycles
     pub fn get_group_status(env: Env, group_id: u64) -> Result<GroupStatus, AjoError> {
-        // Get group
+        // Get the group data
         let group = storage::get_group(&env, group_id).ok_or(AjoError::GroupNotFound)?;
         
-        // If group is complete, return status with no pending contributions
-        if group.is_complete {
-            let next_recipient = group
-                .members
-                .get(group.payout_index)
-                .ok_or(AjoError::NoMembers)?;
-            
-            return Ok(GroupStatus {
-                current_cycle: group.current_cycle,
-                next_recipient,
-                contributions_pending: Vec::new(&env),
-            });
-        }
+        // Get current timestamp
+        let current_time = utils::get_current_timestamp(&env);
         
-        // Get the next recipient
-        let next_recipient = group
-            .members
-            .get(group.payout_index)
-            .ok_or(AjoError::NoMembers)?;
+        // Calculate cycle timing
+        let cycle_end_time = group.cycle_start_time + group.cycle_duration;
+        let is_cycle_active = current_time < cycle_end_time;
         
-        // Identify members who haven't contributed yet for the current cycle
-        let mut pending = Vec::new(&env);
-        for member in group.members.iter() {
-            if !storage::has_contributed(&env, group_id, group.current_cycle, &member) {
-                pending.push_back(member);
+        // Get contribution status for all members in current cycle
+        let contributions = storage::get_cycle_contributions(
+            &env,
+            group_id,
+            group.current_cycle,
+            &group.members,
+        );
+        
+        // Count contributions and build pending list
+        let mut contributions_received: u32 = 0;
+        let mut pending_contributors = Vec::new(&env);
+        
+        for (member, has_contributed) in contributions.iter() {
+            if has_contributed {
+                contributions_received += 1;
+            } else {
+                pending_contributors.push_back(member);
             }
         }
         
+        // Determine next recipient
+        let (has_next_recipient, next_recipient) = if group.is_complete {
+            // Use placeholder (creator) when complete
+            (false, group.creator.clone())
+        } else {
+            // Get the member at payout_index
+            let recipient = group
+                .members
+                .get(group.payout_index)
+                .unwrap_or_else(|| group.creator.clone());
+            (true, recipient)
+        };
+        
+        // Build and return status
         Ok(GroupStatus {
+            group_id: group.id,
             current_cycle: group.current_cycle,
+            has_next_recipient,
             next_recipient,
-            contributions_pending: pending,
+            contributions_received,
+            total_members: group.members.len() as u32,
+            pending_contributors,
+            is_complete: group.is_complete,
+            is_cycle_active,
+            cycle_start_time: group.cycle_start_time,
+            cycle_end_time,
+            current_time,
         })
     }
 }

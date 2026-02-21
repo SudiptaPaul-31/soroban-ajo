@@ -36,9 +36,6 @@ pub struct Group {
     
     /// Whether the group has completed all cycles
     pub is_complete: bool,
-    
-    /// Whether the group was cancelled by its creator
-    pub is_cancelled: bool,
 }
 
 /// Contribution status for a specific member in a specific cycle
@@ -62,16 +59,44 @@ pub struct PayoutRecord {
     pub amount: i128,
     pub timestamp: u64,
 }
-/// Comprehensive status information for a group
+
+/// Comprehensive group status information
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GroupStatus {
+    /// The group ID
+    pub group_id: u64,
+    
     /// Current cycle number
     pub current_cycle: u32,
     
-    /// Address of the member who will receive the next payout
+    /// Whether there is a next recipient (false when group is complete)
+    pub has_next_recipient: bool,
+    
+    /// Address of the next member to receive payout
     pub next_recipient: Address,
     
-    /// List of members who still need to contribute for the current cycle
-    pub contributions_pending: Vec<Address>,
+    /// Number of members who have contributed in the current cycle
+    pub contributions_received: u32,
+    
+    /// Total number of members in the group
+    pub total_members: u32,
+    
+    /// List of members who have not yet contributed in the current cycle
+    pub pending_contributors: Vec<Address>,
+    
+    /// Whether the group has completed all cycles
+    pub is_complete: bool,
+    
+    /// Whether the current cycle is still active
+    pub is_cycle_active: bool,
+    
+    /// Timestamp when the current cycle started
+    pub cycle_start_time: u64,
+    
+    /// Timestamp when the current cycle ends
+    pub cycle_end_time: u64,
+    
+    /// Current block timestamp
+    pub current_time: u64,
 }
